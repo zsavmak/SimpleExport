@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Upscale.trade Portfolio Exporter
 // @namespace    http://tampermonkey.net/
-// @version      2.6
+// @version      2.8
 // @description  Export portfolio history with detailed events and filters
 // @author       Saveli
 // @match        https://app.upscale.trade/portfolio*
@@ -52,10 +52,8 @@ function updateStatus(msg = '') {
 
 function formatFull(value, decimals) {
     if (value === null || typeof value === 'undefined') return "0";
-
-    const numericValue = Number(value); // Convert BigInt or number to Number
-    if (isNaN(numericValue)) return "0"; // Now isNaN check is safe
-
+    const numericValue = Number(value);
+    if (isNaN(numericValue)) return "0";
     const divisor = Math.pow(10, decimals ?? 6);
     return (numericValue / divisor).toString();
 }
@@ -77,13 +75,10 @@ function getPositionIdFromUrl(url) {
 async function triggerAllDetails() {
     const scrollable = document.querySelector('.simplebar-content-wrapper');
     if (!scrollable) return;
-
     scrollable.querySelectorAll('tbody > tr[data-exporter-clicked]').forEach(row => row.removeAttribute('data-exporter-clicked'));
-
     let lastRowCount = 0;
     let retries = 0;
     const maxRetries = 5;
-
     while (retries < maxRetries) {
         const rows = Array.from(scrollable.querySelectorAll('tbody > tr:not([data-exporter-clicked])'));
         if (rows.length > 0) {
@@ -98,10 +93,8 @@ async function triggerAllDetails() {
                 row.setAttribute('data-exporter-clicked', 'true');
             }
         }
-
         scrollable.scrollTo(0, scrollable.scrollHeight);
         await new Promise(r => setTimeout(r, 1200));
-
         const currentRowCount = scrollable.querySelectorAll('tbody > tr').length;
         if (currentRowCount > lastRowCount) {
             lastRowCount = currentRowCount;
@@ -115,34 +108,27 @@ async function triggerAllDetails() {
 async function ensureAllDetailsFetched() {
     if (isFetchingDetails) return;
     isFetchingDetails = true;
-
     const totalPositions = tradeData.positions.size;
     if (!freshLoad && tradeData.events.size >= totalPositions && totalPositions > 0) {
         isFetchingDetails = false;
         return;
     }
-
     freshLoad = false;
     tradeData.events.clear();
-
     if (totalPositions === 0) {
         isFetchingDetails = false;
         updateStatus();
         return;
     }
-
     triggerAllDetails();
-
     await new Promise((resolve) => {
         const pollInterval = 500;
         const timeout = 60000;
         let elapsedTime = 0;
-
         const poll = setInterval(() => {
             elapsedTime += pollInterval;
             const fetchedCount = tradeData.events.size;
             updateStatus(`Сбор данных: ${fetchedCount} / ${totalPositions}`);
-
             if (fetchedCount >= totalPositions) {
                 clearInterval(poll);
                 resolve();
@@ -156,27 +142,22 @@ async function ensureAllDetailsFetched() {
             }
         }, pollInterval);
     });
-
     isFetchingDetails = false;
     updateStatus();
 }
 
 function handleXhr(xhr) {
     if (!xhr._url || !xhr._url.includes('api.upscale.trade') || xhr.status !== 200 || !xhr.responseText) return;
-
     try {
         const url = xhr._url;
         const data = JSON.parse(xhr.responseText);
-
         if (url.includes('/portfolio/history')) {
             if (url.includes('offset=0') && !initialHistoryLoaded) {
                 initialHistoryLoaded = true;
                 tradeData.positions.clear();
             }
-
             const initialCount = tradeData.positions.size;
             (data.data || []).forEach(p => tradeData.positions.set(p.idx, p));
-
             if (tradeData.positions.size > initialCount) {
                  saveData();
                  updateStatus();
@@ -214,7 +195,21 @@ function processPositionData(pos, events, marketInfo, assetDecimals) {
     let totalFee = 0, totalPnl = 0, totalEntryQuote = 0, totalEntryBase = 0;
     let totalCloseQuote = 0, totalCloseBase = 0;
     let formattedEvents = [];
+    let accurateOpenedAt = pos.openedAt;
+    let accurateClosedAt = pos.closedAt;
+    
     if (events && events.length > 0) {
+        // API usually returns events newest first. The last event is the opening event.
+        const openEvent = events[events.length - 1];
+        if ((openEvent.eventName === 'increasePosition' || openEvent.eventName === 'openPosition') && openEvent.timestamp) {
+            accurateOpenedAt = openEvent.timestamp;
+        }
+
+        const closeEvent = events.find(e => e.eventName === 'closePosition');
+        if (closeEvent && closeEvent.timestamp) {
+            accurateClosedAt = closeEvent.timestamp;
+        }
+
         events.forEach(e => {
             const exchangedBaseRaw = BigInt(e.exchangedBase || 0);
             const exchangedQuoteRaw = BigInt(e.exchangedQuote || 0);
@@ -239,7 +234,7 @@ function processPositionData(pos, events, marketInfo, assetDecimals) {
     const pnlToFormat = totalPnl !== 0 ? totalPnl : Number(pos.pnl);
     const feeToFormat = totalFee !== 0 ? totalFee : Number(pos.fee);
     const sizeToFormat = (totalEntryBase > 0) ? (totalEntryBase * Math.pow(10, baseDec)) : BigInt(pos.size || 0);
-    return { ...pos, entryPrice, closePrice, pnlToFormat, feeToFormat, sizeToFormat, marketInfo, baseDecimals: baseDec, quoteDecimals: quoteDec, formattedEvents };
+    return { ...pos, openedAt: accurateOpenedAt, closedAt: accurateClosedAt, entryPrice, closePrice, pnlToFormat, feeToFormat, sizeToFormat, marketInfo, baseDecimals: baseDec, quoteDecimals: quoteDec, formattedEvents };
 }
 
 function getFilteredData() {
